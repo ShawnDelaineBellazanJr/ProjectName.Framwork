@@ -13,19 +13,19 @@ FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 COPY ["Directory.Packages.props", "."]
-COPY ["src/ProjectName.AIServices/ProjectName.AIServices.csproj", "src/ProjectName.AIServices/"]
-RUN dotnet restore "./src/ProjectName.AIServices/ProjectName.AIServices.csproj"
+COPY ["src/ProjectName.GrpcService/ProjectName.GrpcService.csproj", "src/ProjectName.GrpcService/"]
+RUN dotnet restore "./src/ProjectName.GrpcService/ProjectName.GrpcService.csproj"
 COPY . .
-WORKDIR "/src/src/ProjectName.AIServices"
-RUN dotnet build "./ProjectName.AIServices.csproj" -c $BUILD_CONFIGURATION -o /app/build
+WORKDIR "/src/src/ProjectName.GrpcService"
+RUN dotnet build "./ProjectName.GrpcService.csproj" -c $BUILD_CONFIGURATION -o /app/build
 
 # This stage is used to publish the service project to be copied to the final stage
 FROM build AS publish
 ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./ProjectName.AIServices.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+RUN dotnet publish "./ProjectName.GrpcService.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
 
 # This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "ProjectName.AIServices.dll"]
+ENTRYPOINT ["dotnet", "ProjectName.GrpcService.dll"]

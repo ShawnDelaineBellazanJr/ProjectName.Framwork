@@ -1,0 +1,76 @@
+# GitHub Project Manager with Semantic Kernel
+
+## Project Structure
+
+```
+GitHubProjectManager/
+├── GitHubProjectManager.AppHost/            # .NET Aspire host project
+├── GitHubProjectManager.ServiceDefaults/    # Common Aspire service configurations
+├── GitHubProjectManager.ApiService/         # Main API service
+│   ├── Controllers/                         # API endpoints
+│   ├── Services/                            # Service implementations
+│   │   ├── GitHub/                          # GitHub API integration
+│   │   ├── AI/                              # AI service integration
+│   │   └── ProjectPlanning/                 # Project planning logic
+│   ├── Models/                              # Domain models
+│   ├── DTOs/                                # Data transfer objects
+│   └── Plugins/                             # Semantic Kernel plugins
+│       ├── GitHubPlugin/                    # GitHub operations plugin
+│       ├── ProjectManagementPlugin/         # Project planning plugin
+│       └── TaskOrganizationPlugin/          # Task organization plugin
+├── GitHubProjectManager.Web/                # Web frontend
+│   ├── Components/                          # Blazor components
+│   │   ├── ProjectDashboard/                # Project overview dashboard 
+│   │   ├── TaskPlanner/                     # AI-assisted task planning
+│   │   └── IssueOrganizer/                  # AI-assisted issue organization
+│   └── Pages/                               # Blazor pages
+└── GitHubProjectManager.Shared/             # Shared code and models
+```
+
+## Key Features
+
+1. **GitHub Integration**
+   - Authentication with GitHub OAuth
+   - Repository management
+   - Issues and pull requests handling
+   - Project board integration
+   - Milestone tracking
+
+2. **AI-Powered Project Management**
+   - Task breakdown and planning
+   - Issue categorization and prioritization
+   - Sprint planning recommendations
+   - Codebase analysis and task estimation
+   - Release notes generation
+
+3. **Multi-Provider AI Support**
+   - OpenAI (GPT-4, GPT-3.5)
+   - Azure OpenAI
+   - Anthropic Claude
+   - Local models (optional)
+   - Intelligent provider selection based on task
+
+4. **User Experience**
+   - Interactive project dashboard
+   - Natural language task creation
+   - AI-assisted issue management
+   - Progress tracking and reporting
+
+## System Architecture
+
+The system uses a layered architecture:
+
+1. **Presentation Layer** - Blazor web interface
+2. **API Layer** - RESTful API endpoints
+3. **Service Layer** - Business logic and external integrations
+4. **Data Access Layer** - GitHub API client and caching
+
+## AI Integration Points
+
+- **Issue Summarization**: Automatically generate concise summaries of issues
+- **Task Planning**: Break down high-level requirements into actionable tasks
+- **Code Analysis**: Review code changes and suggest improvements
+- **Issue Prioritization**: Analyze and rank issues based on impact and effort
+- **Release Planning**: Generate release notes and version planning
+- **PR Description**: Generate pull request descriptions from commits
+- **Task Estimation**: Provide time estimates for tasks based on codebase understanding

@@ -1,25 +1,25 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>da050539-2f65-493b-8cc9-32871d754dda</UserSecretsId>
-    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
-    <DockerfileContext>..\..</DockerfileContext>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net9.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<UserSecretsId>de6498b0-8d3f-4130-9949-45fd83486a33</UserSecretsId>
+		<DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+		<DockerfileContext>..\..</DockerfileContext>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+		<NoWarn>$(NoWarn);1591</NoWarn>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Azure.Identity" Version="1.14.0-beta.2" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0-preview.2.25164.1" />
-    <PackageReference Include="Microsoft.SemanticKernel" Version="1.42.0" />
-    <PackageReference Include="Microsoft.SemanticKernel.Agents.Core" Version="1.42.0-preview" />
-    <PackageReference Include="Microsoft.SemanticKernel.Connectors.AzureOpenAI" Version="1.42.0" />
-    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.21.2" />
-  </ItemGroup>
+	<ItemGroup>
+	  <PackageReference Include="Aspire.Microsoft.EntityFrameworkCore.SqlServer" />
+	  <PackageReference Include="Microsoft.SemanticKernel" />
+	  <PackageReference Include="Swashbuckle.AspNetCore" />
+	  <PackageReference Include="Swashbuckle.AspNetCore.Annotations" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\ProjectName.Infrastructure\ProjectName.Infrastructure.csproj" />
-  </ItemGroup>
+	<ItemGroup>
+	  <ProjectReference Include="..\ProjectName.ServiceDefaults\ProjectName.ServiceDefaults.csproj" />
+	</ItemGroup>
 
 </Project>

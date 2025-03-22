@@ -1,0 +1,746 @@
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.AI.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.AI.OpenAI;
+using Microsoft.SemanticKernel.Connectors.AI.OpenAI.ChatCompletion;
+using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+
+namespace GitHubProjectManager.ApiService.Services.AI;
+
+/// <summary>
+/// Multi-provider AI service that uses the best available provider for each request
+/// </summary>
+public class MultiProviderAIService : IAIService
+{
+    private readonly ILogger<MultiProviderAIService> _logger;
+    private readonly AIServiceOptions _options;
+    private readonly ConcurrentDictionary<string, IChatCompletionService> _providers = new();
+    private readonly ConcurrentDictionary<string, ProviderMetrics> _metrics = new();
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public MultiProviderAIService(
+        ILogger<MultiProviderAIService> logger,
+        IOptions<AIServiceOptions> options,
+        IHttpClientFactory httpClientFactory)
+    {
+        _logger = logger;
+        _options = options.Value;
+        _httpClientFactory = httpClientFactory;
+        
+        // Register and initialize all providers
+        InitializeProviders();
+    }
+
+    /// <summary>
+    /// Get a chat completion for the specified request
+    /// </summary>
+    public async Task<string> GetCompletionAsync(
+        string systemPrompt,
+        IEnumerable<ChatMessage> messages,
+        AIRequestContext? context = null,
+        CancellationToken cancellationToken = default)
+    {
+        var provider = GetProviderForRequest(context);
+        var stopwatch = Stopwatch.StartNew();
+        int inputTokens = 0;
+        int outputTokens = 0;
+        string providerId = "unknown";
+        
+        try
+        {
+            providerId = provider.GetType().Name;
+            
+            var chatHistory = new ChatHistory(systemPrompt);
+            foreach (var message in messages)
+            {
+                if (message.Role == ChatRole.User)
+                {
+                    chatHistory.AddUserMessage(message.Content);
+                    inputTokens += CountApproximateTokens(message.Content);
+                }
+                else if (message.Role == ChatRole.Assistant)
+                {
+                    chatHistory.AddAssistantMessage(message.Content);
+                    inputTokens += CountApproximateTokens(message.Content);
+                }
+            }
+            
+            var executionSettings = CreateExecutionSettings(context);
+            
+            var result = await provider.GetChatMessageContentAsync(
+                chatHistory,
+                executionSettings,
+                cancellationToken: cancellationToken);
+            
+            outputTokens = CountApproximateTokens(result.Content ?? string.Empty);
+            
+            stopwatch.Stop();
+            RecordSuccess(providerId, stopwatch.ElapsedMilliseconds, inputTokens, outputTokens);
+            
+            return result.Content ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            RecordFailure(providerId, stopwatch.ElapsedMilliseconds);
+            
+            _logger.LogError(ex, "Error getting completion from provider {ProviderId}", providerId);
+            
+            // Try fallback
+            if (context?.EnableFallback == true && provider != GetDefaultProvider())
+            {
+                _logger.LogInformation("Falling back to default provider");
+                return await FallbackCompletionAsync(systemPrompt, messages, cancellationToken);
+            }
+            
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Get a streaming chat completion for the specified request
+    /// </summary>
+    public async IAsyncEnumerable<string> GetStreamingCompletionAsync(
+        string systemPrompt,
+        IEnumerable<ChatMessage> messages,
+        AIRequestContext? context = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var provider = GetProviderForRequest(context);
+        var stopwatch = Stopwatch.StartNew();
+        int inputTokens = 0;
+        int outputTokens = 0;
+        string providerId = "unknown";
+        
+        try
+        {
+            providerId = provider.GetType().Name;
+            
+            var chatHistory = new ChatHistory(systemPrompt);
+            foreach (var message in messages)
+            {
+                if (message.Role == ChatRole.User)
+                {
+                    chatHistory.AddUserMessage(message.Content);
+                    inputTokens += CountApproximateTokens(message.Content);
+                }
+                else if (message.Role == ChatRole.Assistant)
+                {
+                    chatHistory.AddAssistantMessage(message.Content);
+                    inputTokens += CountApproximateTokens(message.Content);
+                }
+            }
+            
+            var executionSettings = CreateExecutionSettings(context);
+            
+            var streamingResponse = provider.GetStreamingChatMessageContentsAsync(
+                chatHistory,
+                executionSettings,
+                cancellationToken: cancellationToken);
+            
+            await foreach (var response in streamingResponse.WithCancellation(cancellationToken))
+            {
+                if (!string.IsNullOrEmpty(response.Content))
+                {
+                    outputTokens += CountApproximateTokens(response.Content);
+                    yield return response.Content;
+                }
+            }
+            
+            stopwatch.Stop();
+            RecordSuccess(providerId, stopwatch.ElapsedMilliseconds, inputTokens, outputTokens);
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            RecordFailure(providerId, stopwatch.ElapsedMilliseconds);
+            
+            _logger.LogError(ex, "Error getting streaming completion from provider {ProviderId}", providerId);
+            
+            // No fallback for streaming as it's more complex to handle mid-stream
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Get chat completion using the default provider as a fallback
+    /// </summary>
+    private async Task<string> FallbackCompletionAsync(
+        string systemPrompt,
+        IEnumerable<ChatMessage> messages,
+        CancellationToken cancellationToken)
+    {
+        var provider = GetDefaultProvider();
+        var stopwatch = Stopwatch.StartNew();
+        int inputTokens = 0;
+        int outputTokens = 0;
+        
+        try
+        {
+            var chatHistory = new ChatHistory(systemPrompt);
+            foreach (var message in messages)
+            {
+                if (message.Role == ChatRole.User)
+                {
+                    chatHistory.AddUserMessage(message.Content);
+                    inputTokens += CountApproximateTokens(message.Content);
+                }
+                else if (message.Role == ChatRole.Assistant)
+                {
+                    chatHistory.AddAssistantMessage(message.Content);
+                    inputTokens += CountApproximateTokens(message.Content);
+                }
+            }
+            
+            var result = await provider.GetChatMessageContentAsync(
+                chatHistory,
+                cancellationToken: cancellationToken);
+            
+            outputTokens = CountApproximateTokens(result.Content ?? string.Empty);
+            
+            stopwatch.Stop();
+            RecordSuccess("DefaultProvider", stopwatch.ElapsedMilliseconds, inputTokens, outputTokens);
+            
+            return result.Content ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            RecordFailure("DefaultProvider", stopwatch.ElapsedMilliseconds);
+            
+            _logger.LogError(ex, "Error getting completion from fallback provider");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Get the best provider for the request context
+    /// </summary>
+    private IChatCompletionService GetProviderForRequest(AIRequestContext? context)
+    {
+        // Use specified provider if requested
+        if (!string.IsNullOrEmpty(context?.PreferredProvider) && 
+            _providers.TryGetValue(context.PreferredProvider, out var requestedProvider))
+        {
+            return requestedProvider;
+        }
+        
+        // Optimize for different task types
+        var taskType = context?.TaskType?.ToLowerInvariant() ?? string.Empty;
+        
+        if (taskType == "coding" || taskType == "code_generation")
+        {
+            if (_providers.TryGetValue("AzureOpenAI", out var azureProvider))
+                return azureProvider;
+            if (_providers.TryGetValue("OpenAI", out var openAiProvider))
+                return openAiProvider;
+        }
+        
+        if (taskType == "creative" || taskType == "writing")
+        {
+            if (_providers.TryGetValue("Anthropic", out var anthropicProvider))
+                return anthropicProvider;
+            if (_providers.TryGetValue("OpenAI", out var openAiProvider))
+                return openAiProvider;
+        }
+        
+        if (taskType == "analysis" || taskType == "reasoning")
+        {
+            if (_providers.TryGetValue("OpenAI", out var openAiProvider))
+                return openAiProvider;
+            if (_providers.TryGetValue("AzureOpenAI", out var azureProvider))
+                return azureProvider;
+        }
+        
+        // Optimize for cost/performance if requested
+        if (context?.OptimizeForCost == true)
+        {
+            return GetCheapestProvider();
+        }
+        
+        if (context?.OptimizeForPerformance == true)
+        {
+            return GetFastestProvider();
+        }
+        
+        if (context?.OptimizeForReliability == true)
+        {
+            return GetMostReliableProvider();
+        }
+        
+        // Default provider
+        return GetDefaultProvider();
+    }
+
+    /// <summary>
+    /// Get the cheapest provider
+    /// </summary>
+    private IChatCompletionService GetCheapestProvider()
+    {
+        // Simple cost ranking - in reality you would consider token pricing
+        var costRanking = new Dictionary<string, double>
+        {
+            { "OpenAI-gpt-3.5-turbo", 1.0 },
+            { "Mistral", 1.5 },
+            { "OpenAI-gpt-4-turbo", 5.0 },
+            { "Anthropic", 8.0 }
+        };
+        
+        string? cheapestKey = _providers.Keys
+            .Where(k => k != "Default") // Exclude default from consideration
+            .OrderBy(k => costRanking.GetValueOrDefault(GetProviderCostKey(k), double.MaxValue))
+            .FirstOrDefault();
+            
+        return cheapestKey != null && _providers.TryGetValue(cheapestKey, out var provider)
+            ? provider
+            : GetDefaultProvider();
+    }
+
+    /// <summary>
+    /// Get the fastest provider based on metrics
+    /// </summary>
+    private IChatCompletionService GetFastestProvider()
+    {
+        string? fastestKey = _metrics
+            .Where(m => m.Value.CallCount > 5) // Only consider providers with enough data
+            .OrderBy(m => m.Value.AverageLatency)
+            .Select(m => m.Key)
+            .FirstOrDefault();
+            
+        return fastestKey != null && _providers.TryGetValue(fastestKey, out var provider)
+            ? provider
+            : GetDefaultProvider();
+    }
+
+    /// <summary>
+    /// Get the most reliable provider based on metrics
+    /// </summary>
+    private IChatCompletionService GetMostReliableProvider()
+    {
+        string? mostReliableKey = _metrics
+            .Where(m => m.Value.CallCount > 5) // Only consider providers with enough data
+            .OrderByDescending(m => m.Value.SuccessRate)
+            .Select(m => m.Key)
+            .FirstOrDefault();
+            
+        return mostReliableKey != null && _providers.TryGetValue(mostReliableKey, out var provider)
+            ? provider
+            : GetDefaultProvider();
+    }
+
+    /// <summary>
+    /// Get the default provider
+    /// </summary>
+    private IChatCompletionService GetDefaultProvider()
+    {
+        return _providers.GetValueOrDefault("Default") ??
+            _providers.FirstOrDefault().Value ??
+            throw new InvalidOperationException("No AI providers available");
+    }
+
+    /// <summary>
+    /// Record a successful call
+    /// </summary>
+    private void RecordSuccess(string providerId, double latencyMs, int inputTokens, int outputTokens)
+    {
+        var metrics = _metrics.GetOrAdd(providerId, _ => new ProviderMetrics());
+        metrics.RecordSuccess(latencyMs, inputTokens, outputTokens);
+    }
+
+    /// <summary>
+    /// Record a failed call
+    /// </summary>
+    private void RecordFailure(string providerId, double latencyMs)
+    {
+        var metrics = _metrics.GetOrAdd(providerId, _ => new ProviderMetrics());
+        metrics.RecordFailure(latencyMs);
+    }
+
+    /// <summary>
+    /// Initialize all configured providers
+    /// </summary>
+    private void InitializeProviders()
+    {
+        if (_options.Providers == null || !_options.Providers.Any())
+        {
+            _logger.LogWarning("No AI providers configured");
+            return;
+        }
+        
+        foreach (var providerConfig in _options.Providers)
+        {
+            try
+            {
+                switch (providerConfig.Type.ToLowerInvariant())
+                {
+                    case "openai":
+                        if (!string.IsNullOrEmpty(providerConfig.ApiKey))
+                        {
+                            var openAiService = new OpenAIChatCompletionService(
+                                providerConfig.ModelId ?? "gpt-4-turbo",
+                                providerConfig.ApiKey);
+                            
+                            _providers[providerConfig.Name] = openAiService;
+                            
+                            if (providerConfig.IsDefault)
+                            {
+                                _providers["Default"] = openAiService;
+                            }
+                            
+                            _logger.LogInformation("Initialized OpenAI provider with model {ModelId}", 
+                                providerConfig.ModelId);
+                        }
+                        break;
+                        
+                    case "azureopenai":
+                        if (!string.IsNullOrEmpty(providerConfig.ApiKey) && 
+                            !string.IsNullOrEmpty(providerConfig.Endpoint))
+                        {
+                            var azureOpenAiService = new AzureOpenAIChatCompletionService(
+                                providerConfig.DeploymentName ?? providerConfig.ModelId ?? "gpt-4",
+                                providerConfig.Endpoint,
+                                providerConfig.ApiKey);
+                            
+                            _providers[providerConfig.Name] = azureOpenAiService;
+                            
+                            if (providerConfig.IsDefault)
+                            {
+                                _providers["Default"] = azureOpenAiService;
+                            }
+                            
+                            _logger.LogInformation("Initialized Azure OpenAI provider with deployment {DeploymentName}", 
+                                providerConfig.DeploymentName);
+                        }
+                        break;
+                        
+                    case "anthropic":
+                        if (!string.IsNullOrEmpty(providerConfig.ApiKey))
+                        {
+                            // Anthropic requires custom implementation
+                            var anthropicService = new AnthropicChatCompletionService(
+                                providerConfig.ModelId ?? "claude-3-opus-20240229",
+                                providerConfig.ApiKey,
+                                _httpClientFactory);
+                            
+                            _providers[providerConfig.Name] = anthropicService;
+                            
+                            if (providerConfig.IsDefault)
+                            {
+                                _providers["Default"] = anthropicService;
+                            }
+                            
+                            _logger.LogInformation("Initialized Anthropic provider with model {ModelId}", 
+                                providerConfig.ModelId);
+                        }
+                        break;
+                        
+                    default:
+                        _logger.LogWarning("Unknown provider type: {ProviderType}", providerConfig.Type);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize provider {ProviderName}", providerConfig.Name);
+            }
+        }
+        
+        // Set up metrics tracking for all providers
+        foreach (var provider in _providers.Keys)
+        {
+            _metrics[provider] = new ProviderMetrics();
+        }
+        
+        _logger.LogInformation("Initialized {ProviderCount} AI providers", _providers.Count);
+    }
+
+    /// <summary>
+    /// Create execution settings based on context
+    /// </summary>
+    private OpenAIPromptExecutionSettings CreateExecutionSettings(AIRequestContext? context)
+    {
+        return new OpenAIPromptExecutionSettings
+        {
+            MaxTokens = context?.MaxTokens ?? _options.DefaultMaxTokens,
+            Temperature = context?.Temperature ?? _options.DefaultTemperature,
+            TopP = context?.TopP ?? _options.DefaultTopP,
+            FrequencyPenalty = context?.FrequencyPenalty ?? 0,
+            PresencePenalty = context?.PresencePenalty ?? 0
+        };
+    }
+
+    /// <summary>
+    /// Get provider key for cost lookup
+    /// </summary>
+    private string GetProviderCostKey(string providerId)
+    {
+        if (providerId.StartsWith("OpenAI-gpt-4"))
+            return "OpenAI-gpt-4-turbo";
+        if (providerId.StartsWith("OpenAI-gpt-3.5"))
+            return "OpenAI-gpt-3.5-turbo";
+        
+        return providerId;
+    }
+
+    /// <summary>
+    /// Get a rough approximation of token count
+    /// </summary>
+    private int CountApproximateTokens(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0;
+            
+        // Very rough approximation - a better implementation would use a proper tokenizer
+        return text.Split(new[] { ' ', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Length;
+    }
+
+    /// <summary>
+    /// Get metrics for all providers
+    /// </summary>
+    public Dictionary<string, ProviderMetricsDto> GetProviderMetrics()
+    {
+        return _metrics.ToDictionary(
+            kvp => kvp.Key,
+            kvp => new ProviderMetricsDto
+            {
+                CallCount = kvp.Value.CallCount,
+                SuccessCount = kvp.Value.SuccessCount,
+                FailureCount = kvp.Value.FailureCount,
+                SuccessRate = kvp.Value.SuccessRate,
+                AverageLatency = kvp.Value.AverageLatency,
+                TotalTokensInput = kvp.Value.TotalTokensInput,
+                TotalTokensOutput = kvp.Value.TotalTokensOutput
+            });
+    }
+}
+
+/// <summary>
+/// Metrics for a provider
+/// </summary>
+public class ProviderMetrics
+{
+    private int _callCount;
+    private int _successCount;
+    private int _failureCount;
+    private double _totalLatency;
+    private long _totalTokensInput;
+    private long _totalTokensOutput;
+    private readonly object _lock = new();
+    
+    public int CallCount => _callCount;
+    public int SuccessCount => _successCount;
+    public int FailureCount => _failureCount;
+    
+    public double SuccessRate => _callCount > 0 ? (double)_successCount / _callCount : 0;
+    public double AverageLatency => _callCount > 0 ? _totalLatency / _callCount : 0;
+    public long TotalTokensInput => _totalTokensInput;
+    public long TotalTokensOutput => _totalTokensOutput;
+    
+    public void RecordSuccess(double latencyMs, int inputTokens, int outputTokens)
+    {
+        lock (_lock)
+        {
+            _callCount++;
+            _successCount++;
+            _totalLatency += latencyMs;
+            _totalTokensInput += inputTokens;
+            _totalTokensOutput += outputTokens;
+        }
+    }
+    
+    public void RecordFailure(double latencyMs)
+    {
+        lock (_lock)
+        {
+            _callCount++;
+            _failureCount++;
+            _totalLatency += latencyMs;
+        }
+    }
+}
+
+/// <summary>
+/// DTO for provider metrics
+/// </summary>
+public class ProviderMetricsDto
+{
+    public int CallCount { get; set; }
+    public int SuccessCount { get; set; }
+    public int FailureCount { get; set; }
+    public double SuccessRate { get; set; }
+    public double AverageLatency { get; set; }
+    public long TotalTokensInput { get; set; }
+    public long TotalTokensOutput { get; set; }
+}
+
+/// <summary>
+/// AI service interface
+/// </summary>
+public interface IAIService
+{
+    Task<string> GetCompletionAsync(
+        string systemPrompt,
+        IEnumerable<ChatMessage> messages,
+        AIRequestContext? context = null,
+        CancellationToken cancellationToken = default);
+        
+    IAsyncEnumerable<string> GetStreamingCompletionAsync(
+        string systemPrompt,
+        IEnumerable<ChatMessage> messages,
+        AIRequestContext? context = null,
+        CancellationToken cancellationToken = default);
+        
+    Dictionary<string, ProviderMetricsDto> GetProviderMetrics();
+}
+
+/// <summary>
+/// Context for AI requests
+/// </summary>
+public class AIRequestContext
+{
+    /// <summary>
+    /// Preferred provider to use
+    /// </summary>
+    public string? PreferredProvider { get; set; }
+    
+    /// <summary>
+    /// Maximum tokens to generate
+    /// </summary>
+    public int? MaxTokens { get; set; }
+    
+    /// <summary>
+    /// Temperature for sampling (0.0 to 1.0)
+    /// </summary>
+    public float? Temperature { get; set; }
+    
+    /// <summary>
+    /// Top-p (nucleus) sampling parameter
+    /// </summary>
+    public float? TopP { get; set; }
+    
+    /// <summary>
+    /// Frequency penalty (0.0 to 2.0)
+    /// </summary>
+    public float? FrequencyPenalty { get; set; }
+    
+    /// <summary>
+    /// Presence penalty (0.0 to 2.0)
+    /// </summary>
+    public float? PresencePenalty { get; set; }
+    
+    /// <summary>
+    /// Optimize for lowest cost
+    /// </summary>
+    public bool OptimizeForCost { get; set; }
+    
+    /// <summary>
+    /// Optimize for best performance
+    /// </summary>
+    public bool OptimizeForPerformance { get; set; }
+    
+    /// <summary>
+    /// Optimize for highest reliability
+    /// </summary>
+    public bool OptimizeForReliability { get; set; }
+    
+    /// <summary>
+    /// Type of task (coding, creative, analysis, etc.)
+    /// </summary>
+    public string? TaskType { get; set; }
+    
+    /// <summary>
+    /// Enable fallback to default provider on failure
+    /// </summary>
+    public bool EnableFallback { get; set; } = true;
+}
+
+/// <summary>
+/// AI service options
+/// </summary>
+public class AIServiceOptions
+{
+    public List<ProviderConfiguration>? Providers { get; set; }
+    public int DefaultMaxTokens { get; set; } = 2000;
+    public float DefaultTemperature { get; set; } = 0.7f;
+    public float DefaultTopP { get; set; } = 1.0f;
+}
+
+/// <summary>
+/// Provider configuration
+/// </summary>
+public class ProviderConfiguration
+{
+    public string Name { get; set; } = string.Empty;
+    public string Type { get; set; } = string.Empty;
+    public string? ApiKey { get; set; }
+    public string? ModelId { get; set; }
+    public string? Endpoint { get; set; }
+    public string? DeploymentName { get; set; }
+    public bool IsDefault { get; set; }
+}
+
+/// <summary>
+/// Chat message with role and content
+/// </summary>
+public class ChatMessage
+{
+    public string Role { get; set; } = ChatRole.User;
+    public string Content { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Chat roles
+/// </summary>
+public static class ChatRole
+{
+    public const string System = "system";
+    public const string User = "user";
+    public const string Assistant = "assistant";
+}
+
+/// <summary>
+/// Anthropic Claude chat completion service implementation
+/// </summary>
+public class AnthropicChatCompletionService : IChatCompletionService
+{
+    private readonly HttpClient _httpClient;
+    private readonly string _modelId;
+    private readonly string _apiKey;
+    
+    public AnthropicChatCompletionService(
+        string modelId,
+        string apiKey,
+        IHttpClientFactory httpClientFactory)
+    {
+        _modelId = modelId;
+        _apiKey = apiKey;
+        _httpClient = httpClientFactory.CreateClient("Anthropic");
+        
+        _httpClient.BaseAddress = new Uri("https://api.anthropic.com/v1/");
+        _httpClient.DefaultRequestHeaders.Add("x-api-key", _apiKey);
+        _httpClient.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+    }
+    
+    public async Task<ChatMessageContent> GetChatMessageContentAsync(
+        ChatHistory chatHistory,
+        PromptExecutionSettings? executionSettings = null,
+        Kernel? kernel = null,
+        CancellationToken cancellationToken = default)
+    {
+        // Build the messages array
+        var messages = new List<object>();
+        
+        foreach (var message in chatHistory)
+        {
+            var role = message.Role.ToString().ToLower();
+            
+            // Anthropic doesn't support 'system' role in the same way as OpenAI
+            if (role == "system")
+            {
+                messages.Add(new { role = "user", content = message.Content });
+                messages.Add(new { role = "assistant", content = "I'll follow these instructions carefully." });
+                continue;
+            }
+            
+            messages.Add(new { role, content = message.Content });
